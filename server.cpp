@@ -5,7 +5,7 @@
 #include <chrono>
 #include <fstream>
 #include <vector>
-
+#include <sstream>
 
 struct Student {
     std::vector<int> ids;
@@ -14,7 +14,19 @@ struct Student {
     std::string birthDate;
     
     bool isSame(const Student& other) const {
-        return firstName == other.firstName && lastName == other.lastName && birthDate == other.birthDate;
+        return firstName == other.firstName && 
+               lastName == other.lastName && 
+               birthDate == other.birthDate;
+    }
+    
+    std::string toString() const {
+        std::stringstream ss;
+        for (size_t i = 0; i < ids.size(); i++) {
+            if (i > 0) ss << ",";
+            ss << ids[i];
+        }
+        ss << "|" << firstName << "|" << lastName << "|" << birthDate;
+        return ss.str();
     }
 };
 
@@ -23,12 +35,15 @@ std::vector<Student> readStudentFile(const std::string& filename) {
     std::ifstream file(filename);
     
     if (!file.is_open()) {
-        std::cout << "Нельзя открыть файл: " << filename << std::endl;
+        std::cout << "Не могу открыть файл: " << filename << std::endl;
         return students;
     }
     
     std::string line;
     while (std::getline(file, line)) {
+        // Пропускаем пустые строки
+        if (line.empty()) continue;
+        
         Student student;
         
         size_t pos1 = line.find(' ');
@@ -36,13 +51,17 @@ std::vector<Student> readStudentFile(const std::string& filename) {
         size_t pos3 = line.find(' ', pos2 + 1);
         
         if (pos1 != std::string::npos && pos2 != std::string::npos && pos3 != std::string::npos) {
-            int id = std::stoi(line.substr(0, pos1));
-            student.ids.push_back(id);
-            student.firstName = line.substr(pos1 + 1, pos2 - pos1 - 1);
-            student.lastName = line.substr(pos2 + 1, pos3 - pos2 - 1);
-            student.birthDate = line.substr(pos3 + 1);
-            
-            students.push_back(student);
+            try {
+                int id = std::stoi(line.substr(0, pos1));
+                student.ids.push_back(id);
+                student.firstName = line.substr(pos1 + 1, pos2 - pos1 - 1);
+                student.lastName = line.substr(pos2 + 1, pos3 - pos2 - 1);
+                student.birthDate = line.substr(pos3 + 1);
+                
+                students.push_back(student);
+            } catch (const std::exception& e) {
+                std::cout << "Ошибка парсинга строки: " << line << " - " << e.what() << std::endl;
+            }
         } else {
             std::cout << "Ошибка в строке: " << line << std::endl;
         }
@@ -51,7 +70,8 @@ std::vector<Student> readStudentFile(const std::string& filename) {
     return students;
 }
 
-std::vector<Student> mergeStudents(const std::vector<Student>& students1, const std::vector<Student>& students2) {
+std::vector<Student> mergeStudents(const std::vector<Student>& students1, 
+                                  const std::vector<Student>& students2) {
     std::vector<Student> merged = students1;
     
     for (const auto& student2 : students2) {
@@ -74,36 +94,12 @@ std::vector<Student> mergeStudents(const std::vector<Student>& students1, const 
     return merged;
 }
 
-void printStudents(const std::vector<Student>& students, const std::string& title) {
-    std::cout << "\n" << title << ":" << std::endl;
-    for (const auto& student : students) {
-        std::cout << "ID: ";
-        for (size_t i = 0; i < student.ids.size(); i++) {
-            if (i > 0) std::cout << ",";
-            std::cout << student.ids[i];
-        }
-        std::cout << " | " << student.firstName << " " << student.lastName << " " << student.birthDate << std::endl;
-    }
-}
-
 int main() {
-    std::cout << "Чтение файлов со студентами..." << std::endl;
     auto students1 = readStudentFile("student_file_1.txt");
     auto students2 = readStudentFile("student_file_2.txt");
-    
-    printStudents(students1, "Студенты из файла 1");
-    printStudents(students2, "Студенты из файла 2");
-    
-    std::cout << "\nИтого в файле 1: " << students1.size() << " студентов" << std::endl;
-    std::cout << "Итого в файле 2: " << students2.size() << " студентов" << std::endl;
-    
-    std::cout << "\nОбъединяем студентов..." << std::endl;
     auto allStudents = mergeStudents(students1, students2);
     
-    printStudents(allStudents, "ОБЪЕДИНЕННЫЙ СПИСОК СТУДЕНТОВ");
-    std::cout << "\nВсего уникальных студентов после объединения: " << allStudents.size() << std::endl;
-    
-    std::cout << "\nЗапуск ZMQ сервера..." << std::endl;
+    std::cout << "Сервер: прочитано " << allStudents.size() << " уникальных студентов" << std::endl;
     
     zmq::context_t context(1);
     zmq::socket_t publisher(context, ZMQ_PUB);
@@ -112,17 +108,28 @@ int main() {
     std::cout << "Сервер запущен на порту 5555..." << std::endl;
     std::this_thread::sleep_for(std::chrono::seconds(1));
     
-    int message_count = 0;
+    int send_count = 0;
     
     while (true) {
-        std::string message = "Уникальных студентов: " + std::to_string(allStudents.size()) + " | Сообщение: " + std::to_string(message_count++);
+        std::stringstream message;
         
-        zmq::message_t zmq_message(message.size());
-        memcpy(zmq_message.data(), message.c_str(), message.size());
+        message << "STUDENTS_START|" << allStudents.size() << "|";
+        
+        for (size_t i = 0; i < allStudents.size(); i++) {
+            if (i > 0) message << ";";
+            message << allStudents[i].toString();
+        }
+        
+        message << "|STUDENTS_END";
+        
+        std::string message_str = message.str();
+        zmq::message_t zmq_message(message_str.size());
+        memcpy(zmq_message.data(), message_str.c_str(), message_str.size());
+        
         publisher.send(zmq_message, zmq::send_flags::none);
         
-        std::cout << "Отправлено: " << message << std::endl;
-        std::this_thread::sleep_for(std::chrono::seconds(2));
+        std::cout << "Отправлено " << allStudents.size() << " студентов (пакет #" << send_count++ << ")" << std::endl;
+        std::this_thread::sleep_for(std::chrono::seconds(5));
     }
     
     return 0;
