@@ -6,6 +6,7 @@
 #include <fstream>
 #include <vector>
 #include <sstream>
+#include <atomic>
 
 struct Student {
     std::vector<int> ids;
@@ -41,7 +42,6 @@ std::vector<Student> readStudentFile(const std::string& filename) {
     
     std::string line;
     while (std::getline(file, line)) {
-        // Пропускаем пустые строки
         if (line.empty()) continue;
         
         Student student;
@@ -94,23 +94,17 @@ std::vector<Student> mergeStudents(const std::vector<Student>& students1,
     return merged;
 }
 
-int main() {
-    auto students1 = readStudentFile("student_file_1.txt");
-    auto students2 = readStudentFile("student_file_2.txt");
-    auto allStudents = mergeStudents(students1, students2);
-    
-    std::cout << "Сервер: прочитано " << allStudents.size() << " уникальных студентов" << std::endl;
-    
+void publisherThread(std::atomic<bool>& running, const std::vector<Student>& allStudents) {
     zmq::context_t context(1);
     zmq::socket_t publisher(context, ZMQ_PUB);
     publisher.bind("tcp://*:5555");
     
-    std::cout << "Сервер запущен на порту 5555..." << std::endl;
+    std::cout << "Поток публикации запущен на порту 5555..." << std::endl;
     std::this_thread::sleep_for(std::chrono::seconds(1));
     
     int send_count = 0;
     
-    while (true) {
+    while (running) {
         std::stringstream message;
         
         message << "STUDENTS_START|" << allStudents.size() << "|";
@@ -126,11 +120,46 @@ int main() {
         zmq::message_t zmq_message(message_str.size());
         memcpy(zmq_message.data(), message_str.c_str(), message_str.size());
         
-        publisher.send(zmq_message, zmq::send_flags::none);
+        try {
+            publisher.send(zmq_message, zmq::send_flags::none);
+            std::cout << "Отправлено " << allStudents.size() << " студентов (пакет #" << send_count++ << ")" << std::endl;
+        } catch (const zmq::error_t& e) {
+            std::cout << "Ошибка отправки: " << e.what() << std::endl;
+        }
         
-        std::cout << "Отправлено " << allStudents.size() << " студентов (пакет #" << send_count++ << ")" << std::endl;
-        std::this_thread::sleep_for(std::chrono::seconds(5));
+        // Ждем 5 секунд или пока не получим сигнал остановки
+        for (int i = 0; i < 5 && running; i++) {
+            std::this_thread::sleep_for(std::chrono::seconds(1));
+        }
     }
     
+    std::cout << "Поток публикации завершен." << std::endl;
+}
+
+int main() {
+    auto students1 = readStudentFile("student_file_1.txt");
+    auto students2 = readStudentFile("student_file_2.txt");
+    auto allStudents = mergeStudents(students1, students2);
+    
+    std::cout << "Сервер: прочитано " << allStudents.size() << " уникальных студентов" << std::endl;
+    
+    std::atomic<bool> running{true};
+    
+    // Запускаем поток публикации
+    std::thread publisher_thread(publisherThread, std::ref(running), std::ref(allStudents));
+    
+    // Основной поток ждет команды остановки
+    std::cout << "Сервер запущен. Нажмите Enter для остановки..." << std::endl;
+    std::cin.get();
+    
+    // Сигнализируем потоку остановиться
+    running = false;
+    
+    // Ждем завершения потока
+    if (publisher_thread.joinable()) {
+        publisher_thread.join();
+    }
+    
+    std::cout << "Сервер завершил работу." << std::endl;
     return 0;
 }

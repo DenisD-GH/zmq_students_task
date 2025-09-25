@@ -4,6 +4,8 @@
 #include <vector>
 #include <sstream>
 #include <algorithm>
+#include <thread>
+#include <atomic>
 
 struct Student {
     std::vector<int> ids;
@@ -23,7 +25,6 @@ std::vector<Student> parseStudents(const std::string& data) {
     std::vector<Student> students;
     
     if (data.find("STUDENTS_START") == std::string::npos) {
-        std::cout << "Получено не студенческое сообщение" << std::endl;
         return students;
     }
     
@@ -40,13 +41,6 @@ std::vector<Student> parseStudents(const std::string& data) {
     
     size_t count_pos = students_data.find('|');
     if (count_pos != std::string::npos) {
-        std::string count_str = students_data.substr(0, count_pos);
-        try {
-            int expected_count = std::stoi(count_str);
-            std::cout << "Ожидается " << expected_count << " студентов" << std::endl;
-        } catch (const std::exception& e) {
-            std::cout << "Ошибка парсинга количества студентов: " << e.what() << std::endl;
-        }
         students_data = students_data.substr(count_pos + 1);
     }
     
@@ -125,38 +119,84 @@ std::vector<Student> parseStudents(const std::string& data) {
     return students;
 }
 
-int main() {
+void subscriberThread(std::atomic<bool>& running) {
     zmq::context_t context(1);
     zmq::socket_t subscriber(context, ZMQ_SUB);
-    subscriber.connect("tcp://localhost:5555");
     
-    subscriber.set(zmq::sockopt::subscribe, "");
-    
-    std::cout << "Клиент подключен к localhost:5555..." << std::endl;
-    std::cout << "Ожидание данных о студентах..." << std::endl;
-    
-    zmq::message_t message;
-    subscriber.recv(message, zmq::recv_flags::none);
-    
-    std::string received_data(static_cast<char*>(message.data()), message.size());
-    
-    auto students = parseStudents(received_data);
-    
-    std::cout << "Получено " << students.size() << " студентов" << std::endl;
-    
-    std::sort(students.begin(), students.end());
-    
-    std::cout << "\n=== ОТСОРТИРОВАННЫЙ СПИСОК СТУДЕНТОВ ===" << std::endl;
-    for (const auto& student : students) {
-        std::cout << "ID: ";
-        for (size_t i = 0; i < student.ids.size(); i++) {
-            if (i > 0) std::cout << ",";
-            std::cout << student.ids[i];
-        }
-        std::cout << " | " << student.firstName << " " << student.lastName << " | " << student.birthDate << std::endl;
+    try {
+        subscriber.connect("tcp://localhost:5555");
+        subscriber.set(zmq::sockopt::subscribe, "");
+    } catch (const zmq::error_t& e) {
+        std::cout << "Ошибка подключения: " << e.what() << std::endl;
+        return;
     }
     
-    std::cout << "\nКлиент завершил работу." << std::endl;
+    std::cout << "Поток подписки подключен к localhost:5555..." << std::endl;
+    std::cout << "Ожидание данных о студентах..." << std::endl;
     
+    while (running) {
+        zmq::message_t message;
+        zmq::recv_result_t result;
+        
+        try {
+            // Неблокирующее получение с таймаутом 1 секунда
+            result = subscriber.recv(message, zmq::recv_flags::dontwait);
+        } catch (const zmq::error_t& e) {
+            if (running) {
+                std::cout << "Ошибка приема: " << e.what() << std::endl;
+            }
+            continue;
+        }
+        
+        if (result && result.value() > 0) {
+            std::string received_data(static_cast<char*>(message.data()), message.size());
+            
+            auto students = parseStudents(received_data);
+            
+            if (!students.empty()) {
+                std::cout << "\n=== ПОЛУЧЕН НОВЫЙ СПИСОК СТУДЕНТОВ ===" << std::endl;
+                std::cout << "Количество: " << students.size() << std::endl;
+                
+                std::sort(students.begin(), students.end());
+                
+                std::cout << "\n=== ОТСОРТИРОВАННЫЙ СПИСОК СТУДЕНТОВ ===" << std::endl;
+                for (const auto& student : students) {
+                    std::cout << "ID: ";
+                    for (size_t i = 0; i < student.ids.size(); i++) {
+                        if (i > 0) std::cout << ",";
+                        std::cout << student.ids[i];
+                    }
+                    std::cout << " | " << student.firstName << " " << student.lastName << " | " << student.birthDate << std::endl;
+                }
+                std::cout << "========================================" << std::endl;
+            }
+        }
+        
+        // Небольшая пауза чтобы не нагружать CPU
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+    
+    std::cout << "Поток подписки завершен." << std::endl;
+}
+
+int main() {
+    std::atomic<bool> running{true};
+    
+    // Запускаем поток подписки
+    std::thread subscriber_thread(subscriberThread, std::ref(running));
+    
+    // Основной поток ждет команды остановки
+    std::cout << "Клиент запущен. Нажмите Enter для остановки..." << std::endl;
+    std::cin.get();
+    
+    // Сигнализируем потоку остановиться
+    running = false;
+    
+    // Ждем завершения потока
+    if (subscriber_thread.joinable()) {
+        subscriber_thread.join();
+    }
+    
+    std::cout << "Клиент завершил работу." << std::endl;
     return 0;
 }
